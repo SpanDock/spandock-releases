@@ -176,3 +176,26 @@ jobs:
           # Re-running a release replaces it, so a fixed build can be republished.
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" release/* --target main --title "SpanDock $TAG" --notes-file notes.md "${flags[@]}"
+
+      # The Homebrew tap (h4ux/homebrew-spandock) gets this release's cask
+      # and formula. TAP_DEPLOY_KEY can write only to the tap. Prereleases
+      # are skipped, so `brew upgrade` follows stable releases.
+      - name: Update the Homebrew tap
+        if: ${{ !contains(inputs.ref, '-') }}
+        env:
+          TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          if [ -z "$TAP_KEY" ]; then echo "TAP_DEPLOY_KEY is not set; skipping the tap"; exit 0; fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$TAP_KEY" > ~/.ssh/tap
+          chmod 600 ~/.ssh/tap
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/tap -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q git@github.com:h4ux/homebrew-spandock.git tap
+          sh source/packaging/homebrew/render.sh "${TAG#v}" release/checksums.txt tap
+          cd tap
+          git add -A
+          if git diff --cached --quiet; then echo "The tap is already at $TAG"; exit 0; fi
+          git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "SpanDock ${TAG#v}"
+          git push -q origin HEAD:main
+          rm -f ~/.ssh/tap
