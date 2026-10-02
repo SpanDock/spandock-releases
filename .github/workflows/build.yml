@@ -88,20 +88,29 @@ jobs:
         run: |
           cd "$RUNNER_TEMP"
           case "${{ matrix.os }}" in
-            macos) ditto -x -k "$GITHUB_WORKSPACE/dist/release/SpanDock-Server-macos-${{ matrix.arch }}.zip" . && bin="./SpanDock Server.app/Contents/MacOS/SpanDock Server" ;;
-            linux) tar -xzf "$GITHUB_WORKSPACE/dist/release/spandock-server-linux-${{ matrix.arch }}.tar.gz" && bin=./spandock-server ;;
-            windows) pwsh -NoProfile -Command "Expand-Archive -Path '$GITHUB_WORKSPACE/dist/release/spandock-server-windows-${{ matrix.arch }}.zip' -DestinationPath ." && bin=./spandock-server.exe ;;
+            macos) ditto -x -k "$GITHUB_WORKSPACE/dist/release/SpanDock-macos-${{ matrix.arch }}.zip" . && bin="./SpanDock.app/Contents/MacOS/SpanDock" ;;
+            linux) tar -xzf "$GITHUB_WORKSPACE/dist/release/spandock-linux-${{ matrix.arch }}.tar.gz" && bin=./spandock ;;
+            windows) pwsh -NoProfile -Command "Expand-Archive -Path '$GITHUB_WORKSPACE/dist/release/spandock-windows-${{ matrix.arch }}.zip' -DestinationPath ." && bin=./spandock.exe ;;
           esac
           "$bin" -version
+          ok=true
+          # First launch: onboarding only. Nothing else may listen.
+          "$bin" -open=false -menubar=false -config-dir "$RUNNER_TEMP/fresh" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > onboarding.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:18787/api/status && break; sleep 1; done
+          curl -fsS http://127.0.0.1:18787/api/status | grep -q '"onboarding":true' || ok=false
+          if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:14318/healthz; then echo "onboarding started the OTLP receiver"; ok=false; fi
+          kill "$pid" || true
+          wait "$pid" 2>/dev/null || true
+          # A chosen mode starts normally.
           "$bin" -role=server -open=false -menubar=false -config-dir "$RUNNER_TEMP/smoke" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > smoke.log 2>&1 &
           pid=$!
-          ok=true
           for _ in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:14318/healthz && break; sleep 1; done
           # Print only the version: the status also carries a per-process CSRF token.
           curl -fsS http://127.0.0.1:18787/api/status | grep -o '"version":"[^"]*"' || ok=false
           curl -fsS -o /dev/null http://127.0.0.1:18787/js/app.js || ok=false
           kill "$pid" || true
-          if [ "$ok" != true ]; then cat smoke.log; exit 1; fi
+          if [ "$ok" != true ]; then cat onboarding.log smoke.log; exit 1; fi
 
       - name: Upload release files
         uses: actions/upload-artifact@v7
