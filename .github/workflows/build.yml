@@ -1,0 +1,169 @@
+# Runs in h4ux/spandock-releases (on its main branch, as
+# .github/workflows/build.yml). It builds, tests, and packages the private
+# source on GitHub's free public-repository runners, and can publish the
+# result as the release installed apps update from.
+#
+# The source is read with SOURCE_DEPLOY_KEY, a read-only deploy key on
+# h4ux/spandock. This repository is public, so its run logs are public:
+# steps print versions and test results only, never source or secrets.
+# Only people with write access to this repository can start a run.
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Source branch, tag, or commit in h4ux/spandock (a v* tag to release)"
+        required: true
+        default: main
+      publish:
+        description: "Publish a release (only for a v* tag)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos, arch: arm64, runner: macos-15 }
+          - { os: macos, arch: amd64, runner: macos-15-intel }
+          - { os: linux, arch: amd64, runner: ubuntu-24.04 }
+          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
+          - { os: windows, arch: amd64, runner: windows-2025 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          repository: h4ux/spandock
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify toolchain
+        run: |
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          go version
+          gcc --version | head -1
+
+      - name: Test
+        run: go test ./...
+
+      - name: Package (macOS)
+        if: matrix.os == 'macos'
+        run: ./scripts/package-macos.sh
+
+      - name: Package (Linux)
+        if: matrix.os == 'linux'
+        run: ./scripts/package-unix.sh
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: ./scripts/package-windows.ps1
+
+      - name: Smoke test the release binary
+        env:
+          SPANDOCK_SECRET_STORE: file
+        run: |
+          cd "$RUNNER_TEMP"
+          case "${{ matrix.os }}" in
+            macos) ditto -x -k "$GITHUB_WORKSPACE/dist/release/SpanDock-Server-macos-${{ matrix.arch }}.zip" . && bin="./SpanDock Server.app/Contents/MacOS/SpanDock Server" ;;
+            linux) tar -xzf "$GITHUB_WORKSPACE/dist/release/spandock-server-linux-${{ matrix.arch }}.tar.gz" && bin=./spandock-server ;;
+            windows) pwsh -NoProfile -Command "Expand-Archive -Path '$GITHUB_WORKSPACE/dist/release/spandock-server-windows-${{ matrix.arch }}.zip' -DestinationPath ." && bin=./spandock-server.exe ;;
+          esac
+          "$bin" -version
+          "$bin" -role=server -open=false -menubar=false -config-dir "$RUNNER_TEMP/smoke" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > smoke.log 2>&1 &
+          pid=$!
+          ok=true
+          for _ in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:14318/healthz && break; sleep 1; done
+          # Print only the version: the status also carries a per-process CSRF token.
+          curl -fsS http://127.0.0.1:18787/api/status | grep -o '"version":"[^"]*"' || ok=false
+          curl -fsS -o /dev/null http://127.0.0.1:18787/js/app.js || ok=false
+          kill "$pid" || true
+          if [ "$ok" != true ]; then cat smoke.log; exit 1; fi
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: spandock-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    if: inputs.publish && startsWith(inputs.ref, 'v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          repository: h4ux/spandock
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: source
+
+      - name: Download release files
+        uses: actions/download-artifact@v7
+        with:
+          pattern: spandock-*
+          path: release
+          merge-multiple: true
+
+      - name: Combine checksums and write notes
+        env:
+          TAG: ${{ inputs.ref }}
+        run: |
+          case "$TAG" in v[0-9]*) ;; *) echo "invalid tag $TAG"; exit 1 ;; esac
+          test "$(git -C source describe --tags --exact-match HEAD)" = "$TAG"
+          cat release/checksums-*.txt | sort -k2 > release/checksums.txt
+          rm release/checksums-*.txt
+          (cd release && sha256sum -c checksums.txt)
+          previous=$(git -C source describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)
+          {
+            echo "## SpanDock ${TAG}"
+            echo
+            echo "Download the DMG for your Mac (arm64 for Apple Silicon, amd64 for Intel), or the archive for Linux or Windows."
+            echo "Installed apps update themselves; checksums are in checksums.txt."
+            echo
+            echo "### Changes"
+            git -C source log --no-merges --pretty='- %s' ${previous:+"$previous..$TAG"}
+          } > notes.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          flags=(--latest)
+          case "$TAG" in *-*) flags=(--prerelease --latest=false) ;; esac
+          # Re-running a release replaces it, so a fixed build can be republished.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" release/* --target main --title "SpanDock $TAG" --notes-file notes.md "${flags[@]}"
