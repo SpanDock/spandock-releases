@@ -1,27 +1,46 @@
 # SpanDock releases
 
-Downloads for **SpanDock**, a local gateway that collects OpenTelemetry traces, logs, and metrics from AI coding tools (Claude Code, Codex, Gemini CLI) and routes them to Langfuse, Grafana Cloud, New Relic, any OTLP backend, or an embedded DuckDB database.
+Downloads for **SpanDock**, a local gateway that collects OpenTelemetry traces, logs, and metrics from AI coding tools (Claude Code, Codex, Gemini CLI). It shows them on local dashboards, keeps them in an embedded DuckDB database, and forwards them to Langfuse, Grafana Cloud, New Relic, or any OTLP backend.
 
-This repository holds release files only. Installed copies of SpanDock check its [latest release](https://github.com/h4ux/spandock-releases/releases/latest) and update themselves.
+SpanDock is **one app**. On first launch it asks whether this computer is a **server** or a **client** (or standalone), and remembers the answer. Installed copies check the [latest release](https://github.com/h4ux/spandock-releases/releases/latest) and update themselves.
 
-## Which file do I need?
+## Install
 
-| System | SpanDock Server | SpanDock Client |
-| --- | --- | --- |
-| macOS, Apple Silicon | `SpanDock-Server-<version>-macos-arm64.dmg` | `SpanDock-Client-<version>-macos-arm64.dmg` |
-| macOS, Intel | `SpanDock-Server-<version>-macos-amd64.dmg` | `SpanDock-Client-<version>-macos-amd64.dmg` |
-| Linux x86-64 | `spandock-server-linux-amd64.tar.gz` | `spandock-client-linux-amd64.tar.gz` |
-| Linux ARM64 | `spandock-server-linux-arm64.tar.gz` | `spandock-client-linux-arm64.tar.gz` |
-| Windows x86-64 | `spandock-server-windows-amd64.zip` | `spandock-client-windows-amd64.zip` |
+**macOS (Homebrew, recommended; no "Open Anyway" prompt):**
+```bash
+brew install --cask h4ux/spandock/spandock
+```
 
-The `SpanDock-*-macos-*.zip` files are what the in-app updater downloads; use the DMG to install by hand. Every file is listed with its SHA-256 in `checksums.txt`.
+**Linux, or a server VM:**
+```bash
+brew install h4ux/spandock/spandock
+spandock -role=server -open=false -menubar=false   # first start chooses the mode
+brew services start spandock
+```
 
-## Installing
+Without Homebrew, download the file for your system from the latest release:
 
-**macOS:** open the DMG and drag the app to Applications. The apps are not yet notarized, so the first time, Control-click the app and choose **Open**.
+| System | File |
+| --- | --- |
+| macOS, Apple Silicon | `SpanDock-<version>-macos-arm64.dmg` |
+| macOS, Intel | `SpanDock-<version>-macos-amd64.dmg` |
+| Linux x86-64 / ARM64 | `spandock-linux-amd64.tar.gz` / `spandock-linux-arm64.tar.gz` |
+| Windows x86-64 | `spandock-windows-amd64.zip` |
 
-**Linux:** `tar -xzf spandock-server-linux-amd64.tar.gz && ./spandock-server` (the dashboard opens at http://127.0.0.1:8787). Run it at login from **Settings → Open at login**, which installs a systemd user service.
+On macOS, drag the app to Applications. Then run `xattr -dr com.apple.quarantine /Applications/SpanDock.app` once, because SpanDock isn't notarized yet.
 
-**Windows:** unzip and run `spandock-server.exe` or `spandock-client.exe`.
+Every file is listed with its SHA-256 in `checksums.txt`:
+```bash
+shasum -a 256 -c checksums.txt --ignore-missing   # macOS
+sha256sum -c checksums.txt --ignore-missing       # Linux
+```
 
-Verify a download with `shasum -a 256 -c checksums.txt --ignore-missing` (macOS) or `sha256sum -c checksums.txt --ignore-missing` (Linux).
+## Other files
+
+- `SpanDock-macos-<arch>.zip`, `spandock-<os>-<arch>.tar.gz`, `spandock-windows-<arch>.zip`: what the built-in updater downloads.
+- `SpanDock-Server-…`, `SpanDock-Client-…`, `spandock-server-…`, `spandock-client-…`: the same build, under the names of the apps from before v0.6. Those apps keep updating from these files and stay in their mode.
+
+## More
+
+- Homebrew tap: [h4ux/homebrew-spandock](https://github.com/h4ux/homebrew-spandock)
+- After installing, the dashboard opens at http://127.0.0.1:8787. Pair clients from the server's **Clients** page, and connect your AI tools under **Integrations**.
