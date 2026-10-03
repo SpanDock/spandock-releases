@@ -1,0 +1,42 @@
+# Runs in SpanDock/spandock-releases. The private source repository pushes each
+# release's files to the "incoming" branch with a deploy key; this workflow
+# verifies them and publishes the GitHub Release that installed apps update from.
+name: Publish release
+
+on:
+  push:
+    branches:
+      - incoming
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release files
+        uses: actions/checkout@v7
+        with:
+          ref: incoming
+
+      - name: Verify checksums
+        run: cd assets && sha256sum -c checksums.txt
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag=$(jq -r .tag release.json)
+          prerelease=$(jq -r .prerelease release.json)
+          case "$tag" in v[0-9]*) ;; *) echo "invalid tag $tag"; exit 1 ;; esac
+          flags=(--latest)
+          if [ "$prerelease" = true ]; then flags=(--prerelease --latest=false); fi
+          # Re-running a release replaces it, so a fixed build can be republished.
+          gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" assets/* --target main --title "SpanDock $tag" --notes-file notes.md "${flags[@]}"
