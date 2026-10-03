@@ -66,6 +66,18 @@ jobs:
           go version
           gcc --version | head -1
 
+      # THIRD_PARTY_NOTICES.txt lists the modules linked on every release
+      # platform, so one runner is enough to check it. It holds only
+      # license texts, so printing it is safe.
+      - name: Check third-party notices
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        run: |
+          go run scripts/third-party-notices.go
+          if ! git diff --stat --exit-code -- THIRD_PARTY_NOTICES.txt; then
+            echo "THIRD_PARTY_NOTICES.txt is stale: run 'go run scripts/third-party-notices.go' and commit it"
+            exit 1
+          fi
+
       # The Postgres settings tests need a real Postgres; a throwaway one
       # runs on the Linux runners (its test password is not a secret).
       - name: Postgres for tests (Linux)
@@ -119,15 +131,22 @@ jobs:
           if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:14318/healthz; then echo "onboarding started the OTLP receiver"; ok=false; fi
           kill "$pid" || true
           wait "$pid" 2>/dev/null || true
+          # A headless first start must accept the EULA.
+          "$bin" -role=server -open=false -menubar=false -config-dir "$RUNNER_TEMP/no-eula" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > no-eula.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 15); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$pid" 2>/dev/null; then echo "started without accepting the EULA"; ok=false; kill "$pid" || true; fi
+          wait "$pid" 2>/dev/null || true
+          grep -q 'spandock.com/legal/eula' no-eula.log || { echo "no EULA message"; ok=false; }
           # A chosen mode starts normally.
-          "$bin" -role=server -open=false -menubar=false -config-dir "$RUNNER_TEMP/smoke" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > smoke.log 2>&1 &
+          "$bin" -role=server -accept-eula -open=false -menubar=false -config-dir "$RUNNER_TEMP/smoke" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > smoke.log 2>&1 &
           pid=$!
           for _ in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:14318/healthz && break; sleep 1; done
           # Print only the version: the status also carries a per-process CSRF token.
           curl -fsS http://127.0.0.1:18787/api/status | grep -o '"version":"[^"]*"' || ok=false
           curl -fsS -o /dev/null http://127.0.0.1:18787/js/app.js || ok=false
           kill "$pid" || true
-          if [ "$ok" != true ]; then cat onboarding.log smoke.log; exit 1; fi
+          if [ "$ok" != true ]; then cat onboarding.log no-eula.log smoke.log; exit 1; fi
 
       - name: Upload release files
         uses: actions/upload-artifact@v7
