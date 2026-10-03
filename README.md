@@ -2,7 +2,7 @@
 
 Downloads for **SpanDock**, a local gateway that collects OpenTelemetry traces, logs, and metrics from AI coding tools (Claude Code, Codex, Gemini CLI). It shows them on local dashboards, keeps them in an embedded DuckDB database, and forwards them to Langfuse, Grafana Cloud, New Relic, or any OTLP backend.
 
-SpanDock is **one app**. On first launch it asks whether this computer is a **server** or a **client** (or standalone), and remembers the answer. Installed copies check the [latest release](https://github.com/SpanDock/spandock-releases/releases/latest) and update themselves.
+SpanDock is **one app**. On first launch it asks whether this computer is a **server** (for yourself or a team) or a **client** (connects to a server), and remembers the answer. A server is activated by signing in at spandock.com; a client joins a server with the pairing code the server gives it. Installed copies check the [latest release](https://github.com/SpanDock/spandock-releases/releases/latest) and update themselves.
 
 ## Install
 
@@ -14,7 +14,7 @@ brew install --cask spandock/spandock/spandock
 **Linux, or a server VM:**
 ```bash
 brew install spandock/spandock/spandock
-spandock -role=server -accept-eula -open=false -menubar=false   # first start chooses the mode and accepts the EULA
+spandock -role=server -accept-eula -open=false -menubar=false   # first start: prints a link and code; approve it by signing in at spandock.com
 brew services start spandock
 ```
 
