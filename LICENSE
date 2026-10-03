@@ -1,0 +1,24 @@
+SpanDock
+Copyright (c) 2025-2026 Nolatech Ltd. All rights reserved.
+
+SpanDock is proprietary software. It is not open source.
+
+The SpanDock binaries, installers and archives published in this repository's
+releases are licensed, not sold, under the SpanDock End User License Agreement:
+
+    https://www.spandock.com/legal/eula
+
+By downloading, installing or using SpanDock you agree to that agreement.
+SpanDock is free to use within the limits of the Free tier; paid tiers are
+described at https://www.spandock.com/pricing and governed by the Terms of
+Service at https://www.spandock.com/legal/terms.
+
+You may not redistribute, sublicense, modify, reverse engineer or host the
+software for third parties except as the End User License Agreement allows.
+
+Open-source components included in SpanDock are licensed under their own
+licenses. Their notices and license texts are in THIRD_PARTY_NOTICES.txt,
+shipped with every release and shown on the app's About page.
+
+"SpanDock" and the SpanDock logos are trademarks of Nolatech Ltd. See
+https://github.com/SpanDock/.github/blob/main/TRADEMARKS.md.

@@ -44,3 +44,7 @@ sha256sum -c checksums.txt --ignore-missing       # Linux
 
 - Homebrew tap: [SpanDock/homebrew-spandock](https://github.com/SpanDock/homebrew-spandock)
 - After installing, the dashboard opens at http://127.0.0.1:8787. Pair clients from the server's **Clients** page, and connect your AI tools under **Integrations**.
+
+## License
+
+SpanDock is proprietary software, free to use under the [End User License Agreement](https://www.spandock.com/legal/eula), with [paid plans](https://www.spandock.com/pricing) for larger teams. It is not open source. See [LICENSE](LICENSE). The open-source components it includes are listed in `THIRD_PARTY_NOTICES.txt` in each release.
