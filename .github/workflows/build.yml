@@ -138,15 +138,35 @@ jobs:
           if kill -0 "$pid" 2>/dev/null; then echo "started without accepting the EULA"; ok=false; kill "$pid" || true; fi
           wait "$pid" 2>/dev/null || true
           grep -q 'spandock.com/legal/eula' no-eula.log || { echo "no EULA message"; ok=false; }
-          # A chosen mode starts normally.
-          "$bin" -role=server -accept-eula -open=false -menubar=false -config-dir "$RUNNER_TEMP/smoke" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > smoke.log 2>&1 &
+          # Standalone mode is retired: -role=standalone exits at once.
+          if "$bin" -role=standalone -accept-eula -open=false -menubar=false -config-dir "$RUNNER_TEMP/standalone" > standalone.log 2>&1; then echo "-role=standalone started"; ok=false; fi
+          # The onboarding page's files are embedded.
+          "$bin" -open=false -menubar=false -config-dir "$RUNNER_TEMP/fresh2" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > onboarding2.log 2>&1 &
           pid=$!
-          for _ in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:14318/healthz && break; sleep 1; done
-          # Print only the version: the status also carries a per-process CSRF token.
-          curl -fsS http://127.0.0.1:18787/api/status | grep -o '"version":"[^"]*"' || ok=false
-          curl -fsS -o /dev/null http://127.0.0.1:18787/js/app.js || ok=false
+          for _ in $(seq 1 30); do curl -fsS -o /dev/null http://127.0.0.1:18787/api/status && break; sleep 1; done
+          curl -fsS -o /dev/null http://127.0.0.1:18787/js/app.js || { echo "no dashboard files"; ok=false; }
           kill "$pid" || true
-          if [ "$ok" != true ]; then cat onboarding.log no-eula.log smoke.log; exit 1; fi
+          wait "$pid" 2>/dev/null || true
+          # Every server needs a spandock.com account: a new headless server
+          # prints the activation link and code, and waits before it starts
+          # anything. A local fake stands in for spandock.com; a release build
+          # accepts it only from SPANDOCK_LICENSE_SERVER on a loopback address,
+          # still checks that the link is on the fake's host, and would accept
+          # only tokens signed with its built-in keys. The fake's device code is
+          # a public test value; the app must never print it.
+          go run "$GITHUB_WORKSPACE/scripts/fake-license-server.go" 127.0.0.1:18790 > fake-license.log 2>&1 &
+          fake=$!
+          for _ in $(seq 1 90); do curl -fsS -o /dev/null http://127.0.0.1:18790/healthz && break; sleep 1; done
+          SPANDOCK_LICENSE_SERVER=http://127.0.0.1:18790 "$bin" -role=server -accept-eula -open=false -menubar=false -config-dir "$RUNNER_TEMP/smoke" -web-addr 127.0.0.1:18787 -otlp-addr 127.0.0.1:14318 > smoke.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do grep -q 'BCDF-2345' smoke.log && break; sleep 1; done
+          grep -q 'http://127.0.0.1:18790/activate?code=BCDF-2345' smoke.log || { echo "no activation link and code"; ok=false; }
+          kill -0 "$pid" 2>/dev/null || { echo "the new server didn't wait for its activation"; ok=false; }
+          if grep -q 'smoke-device-code' smoke.log; then echo "the device code was printed"; ok=false; fi
+          if curl -fsS -o /dev/null --max-time 2 http://127.0.0.1:14318/healthz; then echo "the server started before it was activated"; ok=false; fi
+          kill "$pid" || true
+          kill "$fake" || true
+          if [ "$ok" != true ]; then cat onboarding.log onboarding2.log no-eula.log smoke.log; exit 1; fi
 
       - name: Upload release files
         uses: actions/upload-artifact@v7
