@@ -66,20 +66,37 @@ jobs:
           go version
           gcc --version | head -1
 
+      # The Postgres settings tests need a real Postgres; a throwaway one
+      # runs on the Linux runners (its test password is not a secret).
+      - name: Postgres for tests (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          docker run -d --name pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17
+          for i in $(seq 1 30); do docker exec pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+          echo "SPANDOCK_PG_TEST_DSN=postgres://postgres:test@127.0.0.1:55432/postgres" >> "$GITHUB_ENV"
+
       - name: Test
         run: go test ./...
 
+      # SPANDOCK_LICENSE_KEYS are the public keys that sign licenses
+      # ("kid:base64"); without them a release accepts no license key.
       - name: Package (macOS)
         if: matrix.os == 'macos'
+        env:
+          SPANDOCK_LICENSE_KEYS: ${{ secrets.SPANDOCK_LICENSE_KEYS }}
         run: ./scripts/package-macos.sh
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
+        env:
+          SPANDOCK_LICENSE_KEYS: ${{ secrets.SPANDOCK_LICENSE_KEYS }}
         run: ./scripts/package-unix.sh
 
       - name: Package (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
+        env:
+          SPANDOCK_LICENSE_KEYS: ${{ secrets.SPANDOCK_LICENSE_KEYS }}
         run: ./scripts/package-windows.ps1
 
       - name: Smoke test the release binary
