@@ -168,6 +168,20 @@ jobs:
           kill "$fake" || true
           if [ "$ok" != true ]; then cat onboarding.log onboarding2.log no-eula.log smoke.log; exit 1; fi
 
+      # Footprint targets (docs/FOOTPRINT.md): the release binary may grow
+      # at most 10% over its baseline in packaging/size-baseline.json, and an
+      # idle client (Linux, measured from /proc) must stay under the memory
+      # limit there. It prints sizes only.
+      - name: Footprint check
+        run: |
+          case "${{ matrix.os }}" in
+            macos) bin="$RUNNER_TEMP/SpanDock.app/Contents/MacOS/SpanDock" ;;
+            linux) bin="$RUNNER_TEMP/spandock" ;;
+            windows) bin="$RUNNER_TEMP/spandock.exe" ;;
+          esac
+          go run scripts/footprint-check.go size "${{ matrix.os }}-${{ matrix.arch }}" "$bin"
+          if [ "${{ matrix.os }}" = linux ]; then go run scripts/footprint-check.go rss "$bin"; fi
+
       - name: Upload release files
         uses: actions/upload-artifact@v7
         with:
