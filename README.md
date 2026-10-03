@@ -14,7 +14,7 @@ brew install --cask spandock/spandock/spandock
 **Linux, or a server VM:**
 ```bash
 brew install spandock/spandock/spandock
-spandock -role=server -open=false -menubar=false   # first start chooses the mode
+spandock -role=server -accept-eula -open=false -menubar=false   # first start chooses the mode and accepts the EULA
 brew services start spandock
 ```
 
