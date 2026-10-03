@@ -2,18 +2,18 @@
 
 Downloads for **SpanDock**, a local gateway that collects OpenTelemetry traces, logs, and metrics from AI coding tools (Claude Code, Codex, Gemini CLI). It shows them on local dashboards, keeps them in an embedded DuckDB database, and forwards them to Langfuse, Grafana Cloud, New Relic, or any OTLP backend.
 
-SpanDock is **one app**. On first launch it asks whether this computer is a **server** or a **client** (or standalone), and remembers the answer. Installed copies check the [latest release](https://github.com/h4ux/spandock-releases/releases/latest) and update themselves.
+SpanDock is **one app**. On first launch it asks whether this computer is a **server** or a **client** (or standalone), and remembers the answer. Installed copies check the [latest release](https://github.com/SpanDock/spandock-releases/releases/latest) and update themselves.
 
 ## Install
 
 **macOS (Homebrew, recommended; no "Open Anyway" prompt):**
 ```bash
-brew install --cask h4ux/spandock/spandock
+brew install --cask spandock/spandock/spandock
 ```
 
 **Linux, or a server VM:**
 ```bash
-brew install h4ux/spandock/spandock
+brew install spandock/spandock/spandock
 spandock -role=server -open=false -menubar=false   # first start chooses the mode
 brew services start spandock
 ```
@@ -42,5 +42,5 @@ sha256sum -c checksums.txt --ignore-missing       # Linux
 
 ## More
 
-- Homebrew tap: [h4ux/homebrew-spandock](https://github.com/h4ux/homebrew-spandock)
+- Homebrew tap: [SpanDock/homebrew-spandock](https://github.com/SpanDock/homebrew-spandock)
 - After installing, the dashboard opens at http://127.0.0.1:8787. Pair clients from the server's **Clients** page, and connect your AI tools under **Integrations**.

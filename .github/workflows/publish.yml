@@ -1,4 +1,4 @@
-# Runs in h4ux/spandock-releases. The private source repository pushes each
+# Runs in SpanDock/spandock-releases. The private source repository pushes each
 # release's files to the "incoming" branch with a deploy key; this workflow
 # verifies them and publishes the GitHub Release that installed apps update from.
 name: Publish release
