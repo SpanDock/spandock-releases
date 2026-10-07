@@ -190,10 +190,57 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The QA lab (docs/QA.md): a hub, satellites, clients, a phone and fakes
+  # on loopback, and the scenario suite against them. A release needs it
+  # green. Its output names scenarios, steps and scrubbed log lines only
+  # (these logs are public); the report (scrubbed) is kept, the raw logs
+  # never leave the runner.
+  qa:
+    name: QA lab ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: linux, runner: ubuntu-24.04 }
+          - { os: macos, runner: macos-15 }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          repository: SpanDock/spandock
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Run the QA lab
+        run: make qa
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: qa-report-${{ matrix.os }}
+          path: |
+            qa/out/report.md
+            qa/out/report.json
+          if-no-files-found: warn
+          retention-days: 7
+
   release:
     name: Publish release
     if: inputs.publish && startsWith(inputs.ref, 'v')
-    needs: build
+    needs: [build, qa]
     runs-on: ubuntu-latest
     permissions:
       contents: write
