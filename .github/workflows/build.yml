@@ -344,6 +344,9 @@ jobs:
             echo "### Changes"
             git -C source log --no-merges --pretty='- %s' ${previous:+"$previous..$TAG"}
           } > notes.md
+          # Installed apps show these notes (Settings → Updates), fetched by tag
+          # from the download URL, which unlike the API is not rate limited.
+          cp notes.md release/RELEASE_NOTES.md
 
       - name: Publish
         env:
