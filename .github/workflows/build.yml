@@ -203,12 +203,10 @@ jobs:
   # on loopback, and the scenario suite against them. A release needs it
   # green. Its output names scenarios, steps and scrubbed log lines only
   # (these logs are public); the report (scrubbed) is kept, the raw logs
-  # never leave the runner. Windows is new in the lab and doesn't block yet
-  # (docs/QA.md).
+  # never leave the runner. Every OS blocks, Windows included (docs/QA.md).
   qa:
     name: QA lab ${{ matrix.os }}
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.os == 'windows' }}
     strategy:
       fail-fast: false
       matrix:
