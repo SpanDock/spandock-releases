@@ -1,0 +1,77 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "description": "SpanDock object storage: a StorageV2 account (HTTPS only, TLS 1.2, no public blob access), one private container, and a SAS token limited to that container. Paste the outputs into SpanDock (Settings, Scaling, Object storage). Source of truth: SpanDock's packaging/cloud-setup/."
+  },
+  "parameters": {
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[concat('spandock', take(uniqueString(resourceGroup().id), 13))]",
+      "minLength": 3,
+      "maxLength": 24,
+      "metadata": { "description": "The storage account's name: 3 to 24 lowercase letters and digits, unique in Azure." }
+    },
+    "containerName": {
+      "type": "string",
+      "defaultValue": "spandock",
+      "minLength": 3,
+      "maxLength": 63,
+      "metadata": { "description": "The container SpanDock uses." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": { "description": "Where the storage account is." }
+    },
+    "sasExpiry": {
+      "type": "string",
+      "defaultValue": "[dateTimeAdd(utcNow('u'), 'P1Y', 'yyyy-MM-ddTHH:mm:ssZ')]",
+      "metadata": { "description": "When the SAS token ends (UTC, ISO 8601). SpanDock stops writing then: make a new one before." }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": { "name": "Standard_LRS" },
+      "kind": "StorageV2",
+      "properties": {
+        "accessTier": "Hot",
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2",
+        "allowBlobPublicAccess": false,
+        "allowSharedKeyAccess": true
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2023-05-01",
+      "name": "[format('{0}/default/{1}', parameters('storageAccountName'), parameters('containerName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]"
+      ],
+      "properties": { "publicAccess": "None" }
+    }
+  ],
+  "outputs": {
+    "storageAccount": {
+      "type": "string",
+      "value": "[parameters('storageAccountName')]"
+    },
+    "container": {
+      "type": "string",
+      "value": "[parameters('containerName')]"
+    },
+    "sasExpiry": {
+      "type": "string",
+      "value": "[parameters('sasExpiry')]"
+    },
+    "sasToken": {
+      "type": "string",
+      "value": "[listServiceSas(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName')), '2023-05-01', createObject('canonicalizedResource', format('/blob/{0}/{1}', parameters('storageAccountName'), parameters('containerName')), 'signedResource', 'c', 'signedPermission', 'racwdl', 'signedProtocol', 'https', 'signedExpiry', parameters('sasExpiry'))).serviceSasToken]"
+    }
+  }
+}
