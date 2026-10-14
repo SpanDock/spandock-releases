@@ -7,6 +7,15 @@
 # SpanDock/spandock. This repository is public, so its run logs are public:
 # steps print versions and test results only, never source or secrets.
 # Only people with write access to this repository can start a run.
+#
+# Speed: a run asked for without full or publish (landing a pull request)
+# runs the QA lab and the compatibility matrix on Linux only; nightly runs,
+# full runs and every release run them on every OS. The compatibility
+# matrix keeps the older versions it built (qa/cache) between runs.
+# The repository variable MAC_RUNNER (JSON labels, e.g.
+# ["self-hosted","macOS","ARM64"]) moves the Apple Silicon jobs to a
+# self-hosted Mac, except when publishing: release builds always run on
+# GitHub's runners.
 name: Build
 
 on:
@@ -22,6 +31,10 @@ on:
         default: false
       compat:
         description: "Also run the compatibility matrix (always before publishing)"
+        type: boolean
+        default: false
+      full:
+        description: "QA lab and compatibility on every OS (always nightly and before publishing; otherwise Linux only)"
         type: boolean
         default: false
   # Nightly on the source's main: the tests, the QA lab and the
@@ -40,7 +53,7 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.os }} ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -205,15 +218,14 @@ jobs:
   # (these logs are public); the report (scrubbed) is kept, the raw logs
   # never leave the runner. Every OS blocks, Windows included (docs/QA.md).
   qa:
-    name: QA lab ${{ matrix.os }}
-    runs-on: ${{ matrix.runner }}
+    name: QA lab ${{ matrix.os }} ${{ matrix.shard }}
+    runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: linux, runner: ubuntu-24.04 }
-          - { os: macos, runner: macos-15 }
-          - { os: windows, runner: windows-2025 }
+        # The suite in parts side by side (qa/shard.go): four on Linux and
+        # Windows, two on macOS (GitHub runs five macOS jobs at a time).
+        include: ${{ fromJSON((github.event_name == 'schedule' || inputs.full || inputs.publish) && '[{"os":"linux","runner":"ubuntu-24.04","shard":"1/4","part":"1"},{"os":"linux","runner":"ubuntu-24.04","shard":"2/4","part":"2"},{"os":"linux","runner":"ubuntu-24.04","shard":"3/4","part":"3"},{"os":"linux","runner":"ubuntu-24.04","shard":"4/4","part":"4"},{"os":"macos","runner":"macos-15","shard":"1/2","part":"1"},{"os":"macos","runner":"macos-15","shard":"2/2","part":"2"},{"os":"windows","runner":"windows-2025","shard":"1/4","part":"1"},{"os":"windows","runner":"windows-2025","shard":"2/4","part":"2"},{"os":"windows","runner":"windows-2025","shard":"3/4","part":"3"},{"os":"windows","runner":"windows-2025","shard":"4/4","part":"4"}]' || '[{"os":"linux","runner":"ubuntu-24.04","shard":"1/4","part":"1"},{"os":"linux","runner":"ubuntu-24.04","shard":"2/4","part":"2"},{"os":"linux","runner":"ubuntu-24.04","shard":"3/4","part":"3"},{"os":"linux","runner":"ubuntu-24.04","shard":"4/4","part":"4"}]') }}
     defaults:
       run:
         shell: bash
@@ -234,13 +246,13 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Run the QA lab
-        run: go run ./qa
+        run: go run ./qa -shard ${{ matrix.shard }}
 
       - name: Keep the report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: qa-report-${{ matrix.os }}
+          name: qa-report-${{ matrix.os }}-${{ matrix.part }}
           path: |
             qa/out/report.md
             qa/out/report.json
@@ -255,14 +267,12 @@ jobs:
   qa-compat:
     name: Compatibility ${{ matrix.os }}
     if: github.event_name == 'schedule' || inputs.compat || inputs.publish
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: linux, runner: ubuntu-24.04 }
-          - { os: macos, runner: macos-15 }
+        include: ${{ fromJSON((github.event_name == 'schedule' || inputs.full || inputs.publish) && '[{"os":"linux","runner":"ubuntu-24.04"},{"os":"macos","runner":"macos-15"}]' || '[{"os":"linux","runner":"ubuntu-24.04"}]') }}
     defaults:
       run:
         shell: bash
@@ -282,6 +292,15 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      # Older versions' hubs built from their tags, and the downloaded
+      # releases: they never change, so each run starts from the last one's.
+      - name: Restore the older versions
+        uses: actions/cache@v6
+        with:
+          path: qa/cache
+          key: qa-compat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: qa-compat-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Run the compatibility matrix
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -299,6 +318,10 @@ jobs:
             qa/out/compat/*/report.json
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Leave out the sources
+        if: always()
+        run: rm -rf qa/cache/_src
 
   release:
     name: Publish release
