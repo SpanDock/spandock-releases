@@ -110,7 +110,8 @@ jobs:
           echo "SPANDOCK_PG_TEST_DSN=postgres://postgres:test@127.0.0.1:55432/postgres" >> "$GITHUB_ENV"
 
       - name: Test
-        run: go test ./...
+        # 20 minutes: Windows runners sometimes take over Go's default 10.
+        run: go test -timeout 20m ./...
 
       # SPANDOCK_LICENSE_KEYS are the public keys that sign licenses
       # ("kid:base64"); without them a release accepts no license key.
