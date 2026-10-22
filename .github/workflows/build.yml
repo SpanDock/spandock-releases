@@ -100,6 +100,13 @@ jobs:
             exit 1
           fi
 
+      # A newer DuckDB than go.mod links: a warning on the run (nightly
+      # too), never a failure; the release checklist blocks on it. Prints
+      # version numbers only.
+      - name: Newer DuckDB
+        if: matrix.os == 'linux' && matrix.arch == 'amd64'
+        run: ./scripts/duckdb-check.sh --warn
+
       # The Postgres settings tests need a real Postgres; a throwaway one
       # runs on the Linux runners (its test password is not a secret).
       - name: Postgres for tests (Linux)
