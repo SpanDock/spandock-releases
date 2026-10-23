@@ -338,6 +338,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Check out source
         uses: actions/checkout@v7
@@ -413,3 +414,26 @@ jobs:
           git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "SpanDock ${TAG#v}"
           git push -q origin HEAD:main
           rm -f ~/.ssh/tap
+
+      # Last, so a failed push never holds up the release or the tap.
+      # The container image (ghcr.io/spandock/spandock, packaging/docker/Dockerfile) from this
+      # release's checksummed Linux binaries, for amd64 and arm64; tagged with the version and,
+      # for a stable release, latest. Prereleases get their version tag only.
+      - name: Container image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          mkdir -p image/bin/amd64 image/bin/arm64
+          tar -xzf release/spandock-linux-amd64.tar.gz -C image/bin/amd64 spandock
+          tar -xzf release/spandock-linux-arm64.tar.gz -C image/bin/arm64 spandock
+          cp source/packaging/docker/Dockerfile image/
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker buildx create --use >/dev/null
+          tags=(-t "ghcr.io/spandock/spandock:${TAG#v}")
+          case "$TAG" in *-*) ;; *) tags+=(-t ghcr.io/spandock/spandock:latest) ;; esac
+          docker buildx build --platform linux/amd64,linux/arm64 --push "${tags[@]}" \
+            --label org.opencontainers.image.source=https://github.com/SpanDock/spandock-releases \
+            --label org.opencontainers.image.version="${TAG#v}" \
+            --label org.opencontainers.image.description="SpanDock server" image
+          docker logout ghcr.io
