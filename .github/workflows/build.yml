@@ -437,3 +437,15 @@ jobs:
             --label org.opencontainers.image.version="${TAG#v}" \
             --label org.opencontainers.image.description="SpanDock server" image
           docker logout ghcr.io
+
+      # The Helm chart (packaging/helm/spandock) as an OCI artifact, ghcr.io/spandock/charts/spandock,
+      # versioned with the release (its default image tag is the same version).
+      - name: Helm chart
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          helm package source/packaging/helm/spandock --version "${TAG#v}" --app-version "${TAG#v}" -d chart >/dev/null
+          helm push "chart/spandock-${TAG#v}.tgz" oci://ghcr.io/spandock/charts
+          helm registry logout ghcr.io
