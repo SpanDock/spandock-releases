@@ -25,6 +25,10 @@
 # self-hosted Mac, except when publishing: release builds always run on
 # GitHub's runners.
 name: Build
+# Each run says what it is ("Publish v0.68.0", "Fast CI my-branch", "CI main",
+# "Nightly"): scripts/release-report.go matches runs to releases by it
+# (docs/RELEASE_STATUS.md). Refs only, never a secret.
+run-name: ${{ github.event_name == 'schedule' && 'Nightly' || format('{0} {1}', inputs.publish && 'Publish' || (inputs.fast && 'Fast CI' || 'CI'), inputs.ref || 'main') }}
 
 on:
   workflow_dispatch:
