@@ -326,7 +326,7 @@ Ask IT to exempt these hosts from inspection ("do not decrypt"), or at least to 
 - **When I say:** shows new releases; you press **Install**.
 - **Pinned:** runs exactly the version you enter, even an older one.
 
-An update checks that the new version starts and answers; if it doesn't, the previous version comes back by itself. To go back to an earlier release on purpose, choose **Pinned** and enter that version (for example `0.65.0`). The install script takes `SPANDOCK_VERSION=v0.65.0` for the same.
+An update checks that the new version starts and answers; if it doesn't, the previous version comes back by itself. To go back to an earlier release on purpose, choose **Pinned** and enter that version tag (for example `v0.65.0`). The install script takes `SPANDOCK_VERSION=v0.65.0` for the same.
 
 When the server (the hub) updates, its satellites follow, one at a time, then its clients in batches, each to exactly the server's version and never past it. Turn this off under **Settings → Updates**.
 
