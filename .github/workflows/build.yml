@@ -8,10 +8,18 @@
 # steps print versions and test results only, never source or secrets.
 # Only people with write access to this repository can start a run.
 #
-# Speed: a run asked for without full or publish (landing a pull request)
-# runs the QA lab and the compatibility matrix on Linux only; nightly runs,
-# full runs and every release run them on every OS. The compatibility
-# matrix keeps the older versions it built (qa/cache) between runs.
+# Speed: the plan job decides what runs (the release skill, "What a run runs").
+# The Go tests run as four parallel jobs per platform (scripts/test-shard.sh)
+# beside the build job, which only builds, packages and checks the binary;
+# publishing waits for all of them. Intel Macs run the tests only for a
+# vX.Y.0 tag or a full run (every run still builds, packages, smoke-tests
+# and footprint-checks Intel). A run asked for without full or publish
+# (landing a pull request) runs the QA lab (eight parts) and the
+# compatibility matrix on Linux only; nightly runs, full runs and every
+# release run them on every OS. fast runs only Linux amd64: its tests and
+# one part of the QA lab, no packaging; publish ignores it. The
+# compatibility matrix keeps the older versions it built (qa/cache)
+# between runs.
 # The repository variable MAC_RUNNER (JSON labels, e.g.
 # ["self-hosted","macOS","ARM64"]) moves the Apple Silicon jobs to a
 # self-hosted Mac, except when publishing: release builds always run on
@@ -34,7 +42,11 @@ on:
         type: boolean
         default: false
       full:
-        description: "QA lab and compatibility on every OS (always nightly and before publishing; otherwise Linux only)"
+        description: "QA lab and compatibility on every OS, and the tests on Intel Macs (always nightly and before publishing the QA lab and compatibility; otherwise Linux only)"
+        type: boolean
+        default: false
+      fast:
+        description: "Fast: Linux amd64 only, its tests and one part of the QA lab, no packaging (ignored when publishing)"
         type: boolean
         default: false
   # Nightly on the source's main: the tests, the QA lab and the
@@ -51,22 +63,85 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # What this run runs, as matrices for the jobs below. It prints counts
+  # only. The ref is read from the environment, never pasted into the script.
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      test: ${{ steps.plan.outputs.test }}
+      qa: ${{ steps.plan.outputs.qa }}
+      compat: ${{ steps.plan.outputs.compat }}
+    steps:
+      - name: Plan
+        id: plan
+        env:
+          REF: ${{ inputs.ref || 'main' }}
+          EVENT: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish || false }}
+          FULL: ${{ inputs.full || false }}
+          FAST: ${{ inputs.fast || false }}
+        run: |
+          fast=false
+          if [ "$FAST" = true ] && [ "$PUBLISH" != true ]; then fast=true; fi
+          # The QA lab and compatibility on every OS: nightly, full and publishing.
+          wide=false
+          if [ "$EVENT" = schedule ] || [ "$FULL" = true ] || [ "$PUBLISH" = true ]; then wide=true; fi
+          # The tests on Intel Macs: a vX.Y.0 tag (or its prerelease) or a full run.
+          intel=false
+          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.0(-.*)?$ ]] || [ "$FULL" = true ]; then intel=true; fi
+          platforms='[{"os":"macos","arch":"arm64","runner":"macos-15"},{"os":"macos","arch":"amd64","runner":"macos-15-intel"},{"os":"linux","arch":"amd64","runner":"ubuntu-24.04"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm"},{"os":"windows","arch":"amd64","runner":"windows-2025"}]'
+          qaparts() { jq -nc --arg os "$1" --arg runner "$2" --argjson n "$3" '[range(1; $n + 1) as $i | {os: $os, runner: $runner, shard: "\($i)/\($n)", part: "\($i)"}]'; }
+          if [ "$fast" = true ]; then
+            build='[]'
+            tested=$(jq -c '[.[] | select(.os == "linux" and .arch == "amd64")]' <<<"$platforms")
+            qa=$(qaparts linux ubuntu-24.04 8 | jq -c '.[:1]')
+          else
+            build=$platforms
+            tested=$(jq -c --argjson intel "$intel" '[.[] | select($intel or .runner != "macos-15-intel")]' <<<"$platforms")
+            qa=$(qaparts linux ubuntu-24.04 8)
+            if [ "$wide" = true ]; then
+              qa=$(jq -sc 'add' <<<"$qa $(qaparts macos macos-15 2) $(qaparts windows windows-2025 4)")
+            fi
+          fi
+          test=$(jq -c '[.[] as $p | range(1; 5) as $i | $p + {shard: $i, of: 4}]' <<<"$tested")
+          compat='[{"os":"linux","runner":"ubuntu-24.04"}]'
+          if [ "$wide" = true ]; then compat='[{"os":"linux","runner":"ubuntu-24.04"},{"os":"macos","runner":"macos-15"}]'; fi
+          {
+            echo "build=$build"
+            echo "test=$test"
+            echo "qa=$qa"
+            echo "compat=$compat"
+          } >> "$GITHUB_OUTPUT"
+          echo "fast=$fast, every OS=$wide, Intel tests=$intel: $(jq length <<<"$build") builds, $(jq length <<<"$test") test parts, $(jq length <<<"$qa") QA lab parts"
+
   build:
     name: ${{ matrix.os }} ${{ matrix.arch }}
+    needs: plan
+    if: needs.plan.outputs.build != '[]'
     runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos, arch: arm64, runner: macos-15 }
-          - { os: macos, arch: amd64, runner: macos-15-intel }
-          - { os: linux, arch: amd64, runner: ubuntu-24.04 }
-          - { os: linux, arch: arm64, runner: ubuntu-24.04-arm }
-          - { os: windows, arch: amd64, runner: windows-2025 }
+        include: ${{ fromJSON(needs.plan.outputs.build) }}
     defaults:
       run:
         shell: bash
     steps:
+      # Windows: Defender's real-time scan slows Go builds and tests a lot.
+      # Leave out the workspace, Go's build and module caches, the runner's
+      # temp folder and its tool cache (where setup-go installs Go). Quiet;
+      # an image without Defender doesn't fail the job.
+      - name: Leave Go's folders out of Defender (Windows)
+        if: matrix.os == 'windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:RUNNER_TOOL_CACHE, (Join-Path $env:LOCALAPPDATA 'go-build'), (Join-Path $env:USERPROFILE 'go'))
+          Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
+          Write-Output "Defender exclusions added"
+
       - name: Check out source
         uses: actions/checkout@v7
         with:
@@ -87,38 +162,6 @@ jobs:
           test "$(go env GOARCH)" = "${{ matrix.arch }}"
           go version
           gcc --version | head -1
-
-      # THIRD_PARTY_NOTICES.txt lists the modules linked on every release
-      # platform, so one runner is enough to check it. It holds only
-      # license texts, so printing it is safe.
-      - name: Check third-party notices
-        if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        run: |
-          go run scripts/third-party-notices.go
-          if ! git diff --stat --exit-code -- THIRD_PARTY_NOTICES.txt; then
-            echo "THIRD_PARTY_NOTICES.txt is stale: run 'go run scripts/third-party-notices.go' and commit it"
-            exit 1
-          fi
-
-      # A newer DuckDB than go.mod links: a warning on the run (nightly
-      # too), never a failure; the release checklist blocks on it. Prints
-      # version numbers only.
-      - name: Newer DuckDB
-        if: matrix.os == 'linux' && matrix.arch == 'amd64'
-        run: ./scripts/duckdb-check.sh --warn
-
-      # The Postgres settings tests need a real Postgres; a throwaway one
-      # runs on the Linux runners (its test password is not a secret).
-      - name: Postgres for tests (Linux)
-        if: matrix.os == 'linux'
-        run: |
-          docker run -d --name pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17
-          for i in $(seq 1 30); do docker exec pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
-          echo "SPANDOCK_PG_TEST_DSN=postgres://postgres:test@127.0.0.1:55432/postgres" >> "$GITHUB_ENV"
-
-      - name: Test
-        # 20 minutes: Windows runners sometimes take over Go's default 10.
-        run: go test -timeout 20m ./...
 
       # SPANDOCK_LICENSE_KEYS are the public keys that sign licenses
       # ("kid:base64"); without them a release accepts no license key.
@@ -220,6 +263,93 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # The Go tests in four parts per platform (scripts/test-shard.sh), beside
+  # the build job: they don't hold up packaging, but publishing needs them.
+  # Part 1 also runs every package other than the root one.
+  test:
+    name: Test ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.shard }}/${{ matrix.of }}
+    needs: plan
+    runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.test) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Windows: Defender's real-time scan slows Go builds and tests a lot.
+      # Leave out the workspace, Go's build and module caches, the runner's
+      # temp folder and its tool cache (where setup-go installs Go). Quiet;
+      # an image without Defender doesn't fail the job.
+      - name: Leave Go's folders out of Defender (Windows)
+        if: matrix.os == 'windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:RUNNER_TOOL_CACHE, (Join-Path $env:LOCALAPPDATA 'go-build'), (Join-Path $env:USERPROFILE 'go'))
+          Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
+          Write-Output "Defender exclusions added"
+
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          repository: SpanDock/spandock
+          ref: ${{ inputs.ref || 'main' }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Verify toolchain
+        run: |
+          test "$(go env GOARCH)" = "${{ matrix.arch }}"
+          go version
+          gcc --version | head -1
+
+      # THIRD_PARTY_NOTICES.txt lists the modules linked on every release
+      # platform, so one runner is enough to check it. It holds only
+      # license texts, so printing it is safe.
+      - name: Check third-party notices
+        if: matrix.os == 'linux' && matrix.arch == 'amd64' && matrix.shard == 1
+        run: |
+          go run scripts/third-party-notices.go
+          if ! git diff --stat --exit-code -- THIRD_PARTY_NOTICES.txt; then
+            echo "THIRD_PARTY_NOTICES.txt is stale: run 'go run scripts/third-party-notices.go' and commit it"
+            exit 1
+          fi
+
+      # A newer DuckDB than go.mod links: a warning on the run (nightly
+      # too), never a failure; the release checklist blocks on it. Prints
+      # version numbers only.
+      - name: Newer DuckDB
+        if: matrix.os == 'linux' && matrix.arch == 'amd64' && matrix.shard == 1
+        run: ./scripts/duckdb-check.sh --warn
+
+      # The Postgres settings tests need a real Postgres; a throwaway one
+      # runs on the Linux runners (its test password is not a secret).
+      - name: Postgres for tests (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          docker run -d --name pg -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17
+          for i in $(seq 1 30); do docker exec pg pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
+          echo "SPANDOCK_PG_TEST_DSN=postgres://postgres:test@127.0.0.1:55432/postgres" >> "$GITHUB_ENV"
+
+      # Every test runs in exactly one part: Go itself lists what each
+      # part's patterns select (prints counts only).
+      - name: Check the test parts
+        if: matrix.os == 'linux' && matrix.arch == 'amd64' && matrix.shard == 1
+        run: ./scripts/test-shard.sh -check ${{ matrix.of }}
+
+      - name: Test
+        # 20 minutes: Windows runners sometimes take over Go's default 10.
+        run: ./scripts/test-shard.sh ${{ matrix.shard }} ${{ matrix.of }} -timeout 20m
+
   # The QA lab (docs/QA.md): a hub, satellites, clients, a phone and fakes
   # on loopback, and the scenario suite against them. A release needs it
   # green. Its output names scenarios, steps and scrubbed log lines only
@@ -227,17 +357,32 @@ jobs:
   # never leave the runner. Every OS blocks, Windows included (docs/QA.md).
   qa:
     name: QA lab ${{ matrix.os }} ${{ matrix.shard }}
+    needs: plan
     runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        # The suite in parts side by side (qa/shard.go): four on Linux and
-        # Windows, two on macOS (GitHub runs five macOS jobs at a time).
-        include: ${{ fromJSON((github.event_name == 'schedule' || inputs.full || inputs.publish) && '[{"os":"linux","runner":"ubuntu-24.04","shard":"1/4","part":"1"},{"os":"linux","runner":"ubuntu-24.04","shard":"2/4","part":"2"},{"os":"linux","runner":"ubuntu-24.04","shard":"3/4","part":"3"},{"os":"linux","runner":"ubuntu-24.04","shard":"4/4","part":"4"},{"os":"macos","runner":"macos-15","shard":"1/2","part":"1"},{"os":"macos","runner":"macos-15","shard":"2/2","part":"2"},{"os":"windows","runner":"windows-2025","shard":"1/4","part":"1"},{"os":"windows","runner":"windows-2025","shard":"2/4","part":"2"},{"os":"windows","runner":"windows-2025","shard":"3/4","part":"3"},{"os":"windows","runner":"windows-2025","shard":"4/4","part":"4"}]' || '[{"os":"linux","runner":"ubuntu-24.04","shard":"1/4","part":"1"},{"os":"linux","runner":"ubuntu-24.04","shard":"2/4","part":"2"},{"os":"linux","runner":"ubuntu-24.04","shard":"3/4","part":"3"},{"os":"linux","runner":"ubuntu-24.04","shard":"4/4","part":"4"}]') }}
+        # The suite in parts side by side (qa/shard.go): eight on Linux, four
+        # on Windows, two on macOS (GitHub runs five macOS jobs at a time);
+        # fast runs Linux's first part only.
+        include: ${{ fromJSON(needs.plan.outputs.qa) }}
     defaults:
       run:
         shell: bash
     steps:
+      # Windows: Defender's real-time scan slows Go builds and tests a lot.
+      # Leave out the workspace, Go's build and module caches, the runner's
+      # temp folder and its tool cache (where setup-go installs Go). Quiet;
+      # an image without Defender doesn't fail the job.
+      - name: Leave Go's folders out of Defender (Windows)
+        if: matrix.os == 'windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $paths = @($env:GITHUB_WORKSPACE, $env:RUNNER_TEMP, $env:RUNNER_TOOL_CACHE, (Join-Path $env:LOCALAPPDATA 'go-build'), (Join-Path $env:USERPROFILE 'go'))
+          Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
+          Write-Output "Defender exclusions added"
+
       - name: Check out source
         uses: actions/checkout@v7
         with:
@@ -274,13 +419,14 @@ jobs:
   # only lists this repository's releases.
   qa-compat:
     name: Compatibility ${{ matrix.os }}
+    needs: plan
     if: github.event_name == 'schedule' || inputs.compat || inputs.publish
     runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((github.event_name == 'schedule' || inputs.full || inputs.publish) && '[{"os":"linux","runner":"ubuntu-24.04"},{"os":"macos","runner":"macos-15"}]' || '[{"os":"linux","runner":"ubuntu-24.04"}]') }}
+        include: ${{ fromJSON(needs.plan.outputs.compat) }}
     defaults:
       run:
         shell: bash
@@ -334,7 +480,7 @@ jobs:
   release:
     name: Publish release
     if: inputs.publish && startsWith(inputs.ref, 'v')
-    needs: [build, qa, qa-compat]
+    needs: [plan, build, test, qa, qa-compat]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -449,3 +595,30 @@ jobs:
           helm package source/packaging/helm/spandock --version "${TAG#v}" --app-version "${TAG#v}" -d chart >/dev/null
           helm push "chart/spandock-${TAG#v}.tgz" oci://ghcr.io/spandock/charts
           helm registry logout ghcr.io
+
+      # This repository's README.md and docs/DEPLOY.md come from the source
+      # (packaging/releases-repo), so the public install and deploy guides
+      # follow the release. Only those two files; a failure here never fails
+      # the release. Prints whether they changed, never their content.
+      - name: Check out this repository's main
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: public
+
+      - name: Sync the public docs
+        continue-on-error: true
+        env:
+          TAG: ${{ inputs.ref }}
+        run: |
+          test -d public/.git || { echo "No checkout of main; the docs stay as they are"; exit 0; }
+          mkdir -p public/docs
+          cp source/packaging/releases-repo/README.md public/README.md
+          cp source/packaging/releases-repo/docs/DEPLOY.md public/docs/DEPLOY.md
+          cd public
+          git add README.md docs/DEPLOY.md
+          if git diff --cached --quiet; then echo "README.md and docs/DEPLOY.md are current"; exit 0; fi
+          git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "Docs from SpanDock $TAG"
+          git push -q origin HEAD:main
+          echo "Updated README.md and docs/DEPLOY.md"
