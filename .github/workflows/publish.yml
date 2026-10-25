@@ -40,3 +40,30 @@ jobs:
           # Re-running a release replaces it, so a fixed build can be republished.
           gh release delete "$tag" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$tag" assets/* --target main --title "SpanDock $tag" --notes-file notes.md "${flags[@]}"
+
+      # The public README.md and docs/DEPLOY.md, when the push carries them
+      # (public-docs/), go to main. Only those two files; a failure here never
+      # fails the release. Prints whether they changed, never their content.
+      - name: Check out main
+        if: hashFiles('public-docs/README.md') != ''
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: public
+
+      - name: Sync the public docs
+        if: hashFiles('public-docs/README.md') != ''
+        continue-on-error: true
+        run: |
+          test -d public/.git || { echo "No checkout of main; the docs stay as they are"; exit 0; }
+          tag=$(jq -r .tag release.json)
+          mkdir -p public/docs
+          cp public-docs/README.md public/README.md
+          cp public-docs/docs/DEPLOY.md public/docs/DEPLOY.md
+          cd public
+          git add README.md docs/DEPLOY.md
+          if git diff --cached --quiet; then echo "README.md and docs/DEPLOY.md are current"; exit 0; fi
+          git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "Docs from SpanDock $tag"
+          git push -q origin HEAD:main
+          echo "Updated README.md and docs/DEPLOY.md"
