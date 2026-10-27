@@ -181,6 +181,12 @@ jobs:
           SPANDOCK_LICENSE_KEYS: ${{ secrets.SPANDOCK_LICENSE_KEYS }}
         run: ./scripts/package-unix.sh
 
+      # The sales demo servers' seeder and satellite template
+      # (docs/plans/SALES_DEMO.md): Linux only, beside spandock.
+      - name: Package the demo seeder (Linux)
+        if: matrix.os == 'linux'
+        run: ./scripts/package-demo.sh
+
       - name: Package (Windows)
         if: matrix.os == 'windows'
         shell: pwsh
