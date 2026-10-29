@@ -53,6 +53,10 @@ on:
         description: "Fast: Linux amd64 only, its tests and one part of the QA lab, no packaging (ignored when publishing)"
         type: boolean
         default: false
+      smoke:
+        description: "Also run the browser extension's live adapter smoke test (always nightly)"
+        type: boolean
+        default: false
   # Nightly on the source's main: the tests, the QA lab and the
   # compatibility matrix (docs/QA.md). Scheduled runs have no inputs, so
   # every ref below defaults to main and nothing is published.
@@ -408,6 +412,25 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
+      # The browser-extension-live scenario (qa/browser_live.go) drives the
+      # real extension in Chrome for Testing; Linux's parts install Node's
+      # test dependencies and the browser, and require it (elsewhere it is
+      # skipped). Prints nothing but npm's and the installer's own lines.
+      - name: Set up Node (Linux)
+        if: matrix.os == 'linux'
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/browser-extension/tests/package-lock.json
+
+      - name: Install the browser extension's test browser (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          (cd packages/browser-extension/tests && npm ci --no-audit --no-fund)
+          echo "CHROME_PATH=$(packages/browser-extension/tests/chrome.sh)" >> "$GITHUB_ENV"
+          echo "QA_BROWSER_REQUIRED=1" >> "$GITHUB_ENV"
+
       - name: Run the QA lab
         run: go run ./qa -shard ${{ matrix.shard }}
 
@@ -487,10 +510,96 @@ jobs:
         if: always()
         run: rm -rf qa/cache/_src
 
+  # The browser extension (packages/browser-extension, docs/BROWSER_EXTENSION.md):
+  # its unit tests (jsdom fixtures), the kit's tests (reference receiver, CLI
+  # installers) and the e2e in Chrome for Testing against local fixtures,
+  # which never reaches a real site. Its output is test names and results only.
+  browser-extension:
+    name: Browser extension
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          repository: SpanDock/spandock
+          ref: ${{ inputs.ref || 'main' }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/browser-extension/tests/package-lock.json
+
+      - name: Install the test dependencies
+        working-directory: packages/browser-extension/tests
+        run: npm ci --no-audit --no-fund
+
+      # Chrome for Testing (branded Chrome ignores --load-extension), from
+      # Google's public download bucket through @puppeteer/browsers.
+      - name: Install Chrome for Testing
+        id: chrome
+        run: echo "path=$(packages/browser-extension/tests/chrome.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.path }}
+        run: packages/browser-extension/tests/run_all.sh
+
+  # The live adapter smoke test (docs/BROWSER_EXTENSION.md "The smoke test"):
+  # the extension in Chrome for Testing on the landing pages of the AI chat
+  # sites that work signed out. It never types, sends or signs in, and
+  # prints a per-site table of statuses and counts only (no page text). A
+  # site that blocks headless browsers is "blocked", not a failure; the job
+  # fails only when an adapter no longer recognizes its site. Not a release
+  # gate: third-party sites change on their own schedule.
+  extension-smoke:
+    name: Browser extension smoke
+    needs: plan
+    if: github.event_name == 'schedule' || inputs.smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          repository: SpanDock/spandock
+          ref: ${{ inputs.ref || 'main' }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/browser-extension/tests/package-lock.json
+
+      - name: Install the test dependencies
+        working-directory: packages/browser-extension/tests
+        run: npm ci --no-audit --no-fund
+
+      - name: Install Chrome for Testing
+        id: chrome
+        run: echo "path=$(packages/browser-extension/tests/chrome.sh)" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test the adapters on the live sites
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.path }}
+        run: node packages/browser-extension/tests/smoke_live.js
+
   release:
     name: Publish release
     if: inputs.publish && startsWith(inputs.ref, 'v')
-    needs: [plan, build, test, qa, qa-compat]
+    needs: [plan, build, test, qa, qa-compat, browser-extension]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -632,3 +741,35 @@ jobs:
           git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "Docs from SpanDock $TAG"
           git push -q origin HEAD:main
           echo "Updated README.md and docs/DEPLOY.md"
+
+      # channels.json on this repository's main (internal/channels,
+      # docs/plans/RELEASE_CHANNELS.md): the Stable and Release candidate
+      # versions and each version line's support dates, which installed apps
+      # read instead of GitHub's rate-limited API. Built from the published
+      # releases and packaging/release-lines.json; Stable and LTS never go
+      # back. A failure here never fails the release: apps then ask the API,
+      # as before. Prints the channels' versions only.
+      - name: Set up Go for the channel list
+        continue-on-error: true
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: source/go.mod
+          cache: false
+
+      - name: Update the channel list
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          test -d public/.git || { echo "No checkout of main; the channel list stays as it is"; exit 0; }
+          git -C public pull -q --ff-only origin main || true
+          gh release list -L 1000 --json tagName,isPrerelease,isDraft,publishedAt > releases.json
+          (cd source && go run scripts/release-channels.go -releases ../releases.json -policy packaging/release-lines.json \
+            -previous ../public/channels.json -tag "$TAG" -notes ../notes.md -out ../public/channels.json)
+          cd public
+          git add channels.json
+          if git diff --cached --quiet; then echo "channels.json is current"; exit 0; fi
+          git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "Channels after SpanDock $TAG"
+          git push -q origin HEAD:main
