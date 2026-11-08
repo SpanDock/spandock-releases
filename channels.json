@@ -1,9 +1,13 @@
 {
   "schema": "spandock.channels/v1",
-  "updated": "2026-11-08T16:33:14.842561219Z",
+  "updated": "2026-11-08T19:21:10.348712811Z",
   "stable": {
     "version": "v0.80.0",
     "released": "2026-11-08T16:32:12Z"
+  },
+  "rc": {
+    "version": "v0.81.0-rc.1",
+    "released": "2026-11-08T19:20:20Z"
   },
   "lines": [
     {
