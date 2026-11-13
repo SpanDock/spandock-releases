@@ -1,15 +1,17 @@
 {
   "schema": "spandock.channels/v1",
-  "updated": "2026-11-08T19:21:10.348712811Z",
+  "updated": "2026-11-13T14:52:05.863311336Z",
   "stable": {
-    "version": "v0.80.0",
-    "released": "2026-11-08T16:32:12Z"
-  },
-  "rc": {
-    "version": "v0.81.0-rc.1",
-    "released": "2026-11-08T19:20:20Z"
+    "version": "v0.81.0",
+    "released": "2026-11-13T14:51:15Z"
   },
   "lines": [
+    {
+      "line": "v0.81",
+      "latest": "v0.81.0",
+      "released": "2026-11-13T14:51:15Z",
+      "endOfLife": "2027-05-13T14:51:15Z"
+    },
     {
       "line": "v0.80",
       "latest": "v0.80.0",
