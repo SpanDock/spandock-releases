@@ -1,6 +1,6 @@
 {
   "schema": "spandock.channels/v1",
-  "updated": "2026-11-13T17:24:17.788066147Z",
+  "updated": "2026-11-15T10:26:12.841699725Z",
   "stable": {
     "version": "v0.81.0",
     "released": "2026-11-13T14:51:15Z"
@@ -121,8 +121,8 @@
     {
       "line": "v0.62",
       "latest": "v0.62.0",
-      "released": "2026-10-24T08:53:05Z",
-      "endOfLife": "2027-04-24T08:53:05Z"
+      "released": "2026-11-15T10:25:16Z",
+      "endOfLife": "2027-05-15T10:25:16Z"
     },
     {
       "line": "v0.61",
