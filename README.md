@@ -23,11 +23,11 @@ Without Homebrew, download the file for your system from the latest release:
 | System | File |
 | --- | --- |
 | macOS, Apple Silicon | `SpanDock-<version>-macos-arm64.dmg` |
-| macOS, Intel | `SpanDock-<version>-macos-amd64.dmg` |
+| macOS, Intel (major releases only: 1.0, 2.0, …) | `SpanDock-<version>-macos-amd64.dmg` |
 | Linux x86-64 / ARM64 | `spandock-linux-amd64.tar.gz` / `spandock-linux-arm64.tar.gz` |
 | Windows x86-64 | `spandock-windows-amd64.zip` |
 
-On macOS, drag the app to Applications. Then run `xattr -dr com.apple.quarantine /Applications/SpanDock.app` once, because SpanDock isn't notarized yet.
+On macOS, drag the app to Applications and open it. SpanDock is signed with SpanDock's Developer ID and notarized by Apple, so macOS opens it without asking.
 
 Every file is listed with its SHA-256 in `checksums.txt`:
 ```bash
