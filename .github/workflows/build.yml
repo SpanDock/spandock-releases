@@ -11,9 +11,7 @@
 # Speed: the plan job decides what runs (the release skill, "What a run runs").
 # The Go tests run as four parallel jobs per platform (scripts/test-shard.sh)
 # beside the build job, which only builds, packages and checks the binary;
-# publishing waits for all of them. Intel Macs run the tests only for a
-# vX.Y.0 tag or a full run (every run still builds, packages, smoke-tests
-# and footprint-checks Intel). A run asked for without full or publish
+# publishing waits for all of them. A run asked for without full or publish
 # (landing a pull request) runs the QA lab (eight parts) and the
 # compatibility matrix on Linux only; nightly runs, full runs and every
 # release run them on every OS. fast runs only Linux amd64: its tests and
@@ -46,11 +44,15 @@ on:
         type: boolean
         default: false
       full:
-        description: "QA lab and compatibility on every OS, and the tests on Intel Macs (always nightly and before publishing the QA lab and compatibility; otherwise Linux only)"
+        description: "QA lab and compatibility on every OS (always nightly and before publishing the QA lab and compatibility; otherwise Linux only)"
         type: boolean
         default: false
       fast:
         description: "Fast: Linux amd64 only, its tests and one part of the QA lab, no packaging (ignored when publishing)"
+        type: boolean
+        default: false
+      intel:
+        description: "Also build, test and package Intel Macs (always for a major release, vX.0.0)"
         type: boolean
         default: false
       smoke:
@@ -81,7 +83,49 @@ jobs:
       test: ${{ steps.plan.outputs.test }}
       qa: ${{ steps.plan.outputs.qa }}
       compat: ${{ steps.plan.outputs.compat }}
+      promoted: ${{ steps.plan.outputs.promoted }}
     steps:
+      # A release is published only by the workflow the source's main holds
+      # (packaging/releases-repo/build.yml): a copy here that was not synced
+      # fails before anything is built. Says only whether they match.
+      - name: Check out this workflow
+        if: inputs.publish
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/workflows
+          path: running
+      - name: Check out the source's workflow
+        if: inputs.publish
+        uses: actions/checkout@v7
+        with:
+          repository: SpanDock/spandock
+          ref: main
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          sparse-checkout: packaging/releases-repo
+          path: source
+      - name: This workflow is the source's
+        if: inputs.publish
+        run: |
+          if ! cmp -s running/.github/workflows/build.yml source/packaging/releases-repo/build.yml; then
+            echo "::error::build.yml here differs from packaging/releases-repo/build.yml on the source's main: sync it, then publish"
+            exit 1
+          fi
+          echo "The workflow matches the source"
+      # Promoting a release candidate (vX.Y.Z on the commit of a published
+      # vX.Y.Z-rc.N): the tags, to see whether this commit was tested.
+      - name: Check out the release's tags
+        if: ${{ inputs.publish && startsWith(inputs.ref, 'v') && !contains(inputs.ref, '-') && !inputs.full }}
+        uses: actions/checkout@v7
+        with:
+          repository: SpanDock/spandock
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 0
+          sparse-checkout: packaging/releases-repo
+          path: tagged
+
       - name: Plan
         id: plan
         env:
@@ -90,16 +134,33 @@ jobs:
           PUBLISH: ${{ inputs.publish || false }}
           FULL: ${{ inputs.full || false }}
           FAST: ${{ inputs.fast || false }}
+          COMPAT_VERSIONS: ${{ vars.QA_COMPAT || 'v0.62.0' }}
+          INTEL: ${{ inputs.intel || false }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # A release candidate this workflow published passed every test,
+          # the QA lab and compatibility on its commit. Publishing the same
+          # commit as the release builds and publishes only; full=true runs
+          # everything again. Any doubt (no tags, no such release) tests.
+          promoted=false
+          if [ "$PUBLISH" = true ] && [ "$FULL" != true ] && [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d tagged/.git ]; then
+            for rc in $(git -C tagged tag --points-at HEAD --list "$REF-rc.*"); do
+              if [ "$(gh release view "$rc" -R "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null)" = false ]; then
+                promoted=true
+              fi
+            done
+          fi
           fast=false
           if [ "$FAST" = true ] && [ "$PUBLISH" != true ]; then fast=true; fi
           # The QA lab and compatibility on every OS: nightly, full and publishing.
           wide=false
           if [ "$EVENT" = schedule ] || [ "$FULL" = true ] || [ "$PUBLISH" = true ]; then wide=true; fi
-          # The tests on Intel Macs: a vX.Y.0 tag (or its prerelease) or a full run.
-          intel=false
-          if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.0(-.*)?$ ]] || [ "$FULL" = true ]; then intel=true; fi
-          platforms='[{"os":"macos","arch":"arm64","runner":"macos-15"},{"os":"macos","arch":"amd64","runner":"macos-15-intel"},{"os":"linux","arch":"amd64","runner":"ubuntu-24.04"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm"},{"os":"windows","arch":"amd64","runner":"windows-2025"}]'
+          platforms='[{"os":"macos","arch":"arm64","runner":"macos-15"},{"os":"linux","arch":"amd64","runner":"ubuntu-24.04"},{"os":"linux","arch":"arm64","runner":"ubuntu-24.04-arm"},{"os":"windows","arch":"amd64","runner":"windows-2025"}]'
+          # Intel Macs: built, tested and published only for a major release
+          # (vX.0.0 or its prerelease), or when a run asks for them (intel=true).
+          if [[ "$REF" =~ ^v[0-9]+\.0\.0(-.*)?$ ]] || [ "$INTEL" = true ]; then
+            platforms=$(jq -c '. + [{"os":"macos","arch":"amd64","runner":"macos-15-intel"}]' <<<"$platforms")
+          fi
           qaparts() { jq -nc --arg os "$1" --arg runner "$2" --argjson n "$3" '[range(1; $n + 1) as $i | {os: $os, runner: $runner, shard: "\($i)/\($n)", part: "\($i)"}]'; }
           if [ "$fast" = true ]; then
             build='[]'
@@ -107,7 +168,7 @@ jobs:
             qa=$(qaparts linux ubuntu-24.04 8 | jq -c '.[:1]')
           else
             build=$platforms
-            tested=$(jq -c --argjson intel "$intel" '[.[] | select($intel or .runner != "macos-15-intel")]' <<<"$platforms")
+            tested=$platforms
             qa=$(qaparts linux ubuntu-24.04 8)
             if [ "$wide" = true ]; then
               qa=$(jq -sc 'add' <<<"$qa $(qaparts macos macos-15 2) $(qaparts windows windows-2025 4)")
@@ -116,13 +177,16 @@ jobs:
           test=$(jq -c '[.[] as $p | range(1; 5) as $i | $p + {shard: $i, of: 4}]' <<<"$tested")
           compat='[{"os":"linux","runner":"ubuntu-24.04"}]'
           if [ "$wide" = true ]; then compat='[{"os":"linux","runner":"ubuntu-24.04"},{"os":"macos","runner":"macos-15"}]'; fi
+          # One compatibility job per version, so the versions run side by side.
+          compat=$(jq -c --arg v "$COMPAT_VERSIONS" '[.[] as $p | ($v | split(",")[] | gsub("\\s"; "") | select(. != "")) as $ver | $p + {version: $ver}]' <<<"$compat")
           {
             echo "build=$build"
             echo "test=$test"
             echo "qa=$qa"
             echo "compat=$compat"
+            echo "promoted=$promoted"
           } >> "$GITHUB_OUTPUT"
-          echo "fast=$fast, every OS=$wide, Intel tests=$intel: $(jq length <<<"$build") builds, $(jq length <<<"$test") test parts, $(jq length <<<"$qa") QA lab parts"
+          echo "fast=$fast, every OS=$wide: $(jq length <<<"$build") builds, $(jq length <<<"$test") test parts, $(jq length <<<"$qa") QA lab parts; a tested candidate's commit (tests skipped)=$promoted"
 
   build:
     name: ${{ matrix.os }} ${{ matrix.arch }}
@@ -174,8 +238,8 @@ jobs:
       # SPANDOCK_LICENSE_KEYS are the public keys that sign licenses
       # ("kid:base64"); without them a release accepts no license key.
       # Developer ID signing and notarization (packaging/macos), only when
-      # publishing and only while the secrets exist; otherwise ad-hoc, as
-      # before. The certificate goes into a temporary keychain that lives
+      # publishing; a publish without the secrets or the identity fails here
+      # (other runs sign ad-hoc). The certificate goes into a temporary keychain that lives
       # and dies with the runner. Prints the identity count only.
       - name: Signing keychain (macOS)
         id: signing
@@ -185,7 +249,7 @@ jobs:
           P12_PASSWORD: ${{ secrets.MACOS_P12_PASSWORD }}
           NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
         run: |
-          if [ -z "$APP_P12" ] || [ -z "$P12_PASSWORD" ] || [ -z "$NOTARY_KEY_P8" ]; then echo "No Developer ID secrets: signing ad-hoc"; exit 0; fi
+          if [ -z "$APP_P12" ] || [ -z "$P12_PASSWORD" ] || [ -z "$NOTARY_KEY_P8" ]; then echo "::error::A Developer ID secret is missing: a release is never published ad-hoc signed"; exit 1; fi
           kc="$RUNNER_TEMP/signing.keychain-db"
           kp=$(openssl rand -hex 16)
           security create-keychain -p "$kp" "$kc"
@@ -197,7 +261,7 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kp" "$kc" >/dev/null
           security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
           identity=$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')
-          if [ -z "$identity" ]; then echo "The certificate holds no Developer ID Application identity: signing ad-hoc"; exit 0; fi
+          if [ -z "$identity" ]; then echo "::error::The certificate holds no Developer ID Application identity: a release is never published ad-hoc signed"; exit 1; fi
           umask 077
           printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
           echo "identity=$identity" >> "$GITHUB_OUTPUT"
@@ -318,6 +382,7 @@ jobs:
   test:
     name: Test ${{ matrix.os }} ${{ matrix.arch }} ${{ matrix.shard }}/${{ matrix.of }}
     needs: plan
+    if: needs.plan.outputs.promoted != 'true'
     runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     strategy:
       fail-fast: false
@@ -395,6 +460,22 @@ jobs:
         if: matrix.os == 'linux' && matrix.arch == 'amd64' && matrix.shard == 1
         run: ./scripts/test-shard.sh -check ${{ matrix.of }}
 
+      # The security check suite's tests (docs/SECURITY_CHECKS.md) are behind
+      # a build tag, so the parts never run them. Tests only: the scanners
+      # and fuzzing print source, so they stay in the private repository's
+      # security.yml.
+      - name: Security check suite
+        if: matrix.os == 'linux' && matrix.arch == 'amd64' && matrix.shard == 1
+        env:
+          SPANDOCK_SECRET_STORE: file
+        run: go test -tags securitycheck -run '^TestSecCheck' -count=1 -timeout 20m . ./internal/...
+
+      # The race detector, over the packages outside the root (their tests
+      # take seconds; the root's under it take too long for every run).
+      - name: Race detector
+        if: matrix.os == 'linux' && matrix.arch == 'amd64' && matrix.shard == 1
+        run: go test -race -count=1 -timeout 20m ./internal/... ./mobilecore/...
+
       - name: Test
         # 20 minutes: Windows runners sometimes take over Go's default 10.
         run: ./scripts/test-shard.sh ${{ matrix.shard }} ${{ matrix.of }} -timeout 20m
@@ -407,6 +488,7 @@ jobs:
   qa:
     name: QA lab ${{ matrix.os }} ${{ matrix.shard }}
     needs: plan
+    if: needs.plan.outputs.promoted != 'true'
     runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     strategy:
       fail-fast: false
@@ -486,9 +568,9 @@ jobs:
   # output is the QA lab's (scrubbed: these logs are public); GITHUB_TOKEN
   # only lists this repository's releases.
   qa-compat:
-    name: Compatibility ${{ matrix.os }}
+    name: Compatibility ${{ matrix.os }} ${{ matrix.version }}
     needs: plan
-    if: github.event_name == 'schedule' || inputs.compat || inputs.publish
+    if: (github.event_name == 'schedule' || inputs.compat || inputs.publish) && needs.plan.outputs.promoted != 'true'
     runs-on: ${{ (matrix.runner == 'macos-15' && vars.MAC_RUNNER && !inputs.publish) && fromJSON(vars.MAC_RUNNER) || matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -520,19 +602,28 @@ jobs:
         uses: actions/cache@v6
         with:
           path: qa/cache
-          key: qa-compat-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
-          restore-keys: qa-compat-${{ runner.os }}-${{ runner.arch }}-
+          key: qa-compat-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-${{ github.run_id }}
+          restore-keys: |
+            qa-compat-${{ runner.os }}-${{ runner.arch }}-${{ matrix.version }}-
+            qa-compat-${{ runner.os }}-${{ runner.arch }}-
 
+      # One version per job. The plan job lists them by hand (QA_COMPAT)
+      # until two minor versions with published binaries exist (v0.60.0 and
+      # v0.61.0 have none); then set the variable QA_COMPAT to the two
+      # previous minors at each release.
+      # When publishing, a pair that couldn't run fails the job.
       - name: Run the compatibility matrix
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          QA_COMPAT: ${{ matrix.version }}
+          QA_COMPAT_STRICT: ${{ inputs.publish && '1' || '' }}
         run: make qa-compat
 
       - name: Keep the report
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: qa-compat-report-${{ matrix.os }}
+          name: qa-compat-report-${{ matrix.os }}-${{ matrix.version }}
           path: |
             qa/out/compat/report.md
             qa/out/compat/report.json
@@ -552,6 +643,7 @@ jobs:
   browser-extension:
     name: Browser extension
     needs: plan
+    if: needs.plan.outputs.promoted != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     defaults:
@@ -633,7 +725,14 @@ jobs:
 
   release:
     name: Publish release
-    if: inputs.publish && startsWith(inputs.ref, 'v')
+    # Every gate passed, or was skipped because this commit's release
+    # candidate already passed them (plan's "promoted"); never after a failure.
+    if: >-
+      ${{ always() && inputs.publish && startsWith(inputs.ref, 'v')
+      && needs.plan.result == 'success' && needs.build.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+      && (needs.plan.outputs.promoted == 'true'
+      || (needs.test.result == 'success' && needs.qa.result == 'success' && needs.qa-compat.result == 'success' && needs.browser-extension.result == 'success')) }}
     needs: [plan, build, test, qa, qa-compat, browser-extension]
     runs-on: ubuntu-latest
     permissions:
@@ -670,7 +769,7 @@ jobs:
           {
             echo "## SpanDock ${TAG}"
             echo
-            echo "Download the DMG for your Mac (arm64 for Apple Silicon, amd64 for Intel), or the archive for Linux or Windows."
+            echo "Download the DMG for your Mac (Apple Silicon; Intel Macs are built for major releases only), or the archive for Linux or Windows."
             echo "Installed apps update themselves; checksums are in checksums.txt."
             echo
             echo "### Changes"
@@ -692,10 +791,54 @@ jobs:
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" release/* --target main --title "SpanDock $TAG" --notes-file notes.md "${flags[@]}"
 
+      - name: Check out this repository's main
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          path: public
+
+      # channels.json on this repository's main (internal/channels,
+      # docs/plans/RELEASE_CHANNELS.md): the Stable and Release candidate
+      # versions and each version line's support dates, which installed apps
+      # read instead of GitHub's rate-limited API. Built from the published
+      # releases and packaging/release-lines.json; Stable and LTS never go
+      # back. Directly after Publish, so nothing optional below can leave a
+      # published release that no installed app is offered. A failure here
+      # never undoes the release: apps then ask the API, as before, and the
+      # last step fails the job. Prints the channels' versions only.
+      - name: Set up Go for the channel list
+        continue-on-error: true
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: source/go.mod
+          cache: false
+
+      - name: Update the channel list
+        id: channels
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.ref }}
+        run: |
+          test -d public/.git || { echo "No checkout of main; the channel list stays as it is"; exit 0; }
+          git -C public pull -q --ff-only origin main || true
+          gh release list -L 1000 --json tagName,isPrerelease,isDraft,publishedAt > releases.json
+          (cd source && go run scripts/release-channels.go -releases ../releases.json -policy packaging/release-lines.json \
+            -previous ../public/channels.json -tag "$TAG" -notes ../notes.md -out ../public/channels.json)
+          cd public
+          git add channels.json
+          if git diff --cached --quiet; then echo "channels.json is current"; exit 0; fi
+          git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "Channels after SpanDock $TAG"
+          git push -q origin HEAD:main
+
       # The Homebrew tap (SpanDock/homebrew-spandock) gets this release's cask
       # and formula. TAP_DEPLOY_KEY can write only to the tap. Prereleases
       # are skipped, so `brew upgrade` follows stable releases.
       - name: Update the Homebrew tap
+        id: tap
+        continue-on-error: true
         if: ${{ !contains(inputs.ref, '-') }}
         env:
           TAP_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
@@ -715,11 +858,13 @@ jobs:
           git push -q origin HEAD:main
           rm -f ~/.ssh/tap
 
-      # Last, so a failed push never holds up the release or the tap.
+      # A failed push never holds up the release, the channel list or the tap.
       # The container image (ghcr.io/spandock/spandock, packaging/docker/Dockerfile) from this
       # release's checksummed Linux binaries, for amd64 and arm64; tagged with the version and,
       # for a stable release, latest. Prereleases get their version tag only.
       - name: Container image
+        id: image
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.ref }}
@@ -729,6 +874,9 @@ jobs:
           tar -xzf release/spandock-linux-arm64.tar.gz -C image/bin/arm64 spandock
           cp source/packaging/docker/Dockerfile image/
           echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # The image must start and say this version before any tag moves.
+          docker build -q -t spandock-check image >/dev/null
+          docker run --rm spandock-check -version | grep -qF "${TAG#v}" || { echo "::error::The image does not start as ${TAG#v}"; exit 1; }
           docker buildx create --use >/dev/null
           tags=(-t "ghcr.io/spandock/spandock:${TAG#v}")
           case "$TAG" in *-*) ;; *) tags+=(-t ghcr.io/spandock/spandock:latest) ;; esac
@@ -741,10 +889,13 @@ jobs:
       # The Helm chart (packaging/helm/spandock) as an OCI artifact, ghcr.io/spandock/charts/spandock,
       # versioned with the release (its default image tag is the same version).
       - name: Helm chart
+        id: chart
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.ref }}
         run: |
+          helm lint --quiet source/packaging/helm/spandock >/dev/null 2>&1 || { echo "::error::helm lint failed for the chart"; exit 1; }
           echo "$GH_TOKEN" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           helm package source/packaging/helm/spandock --version "${TAG#v}" --app-version "${TAG#v}" -d chart >/dev/null
           helm push "chart/spandock-${TAG#v}.tgz" oci://ghcr.io/spandock/charts
@@ -754,13 +905,6 @@ jobs:
       # (packaging/releases-repo), so the public install and deploy guides
       # follow the release. Only those two files; a failure here never fails
       # the release. Prints whether they changed, never their content.
-      - name: Check out this repository's main
-        continue-on-error: true
-        uses: actions/checkout@v7
-        with:
-          ref: main
-          path: public
-
       - name: Sync the public docs
         continue-on-error: true
         env:
@@ -777,34 +921,75 @@ jobs:
           git push -q origin HEAD:main
           echo "Updated README.md and docs/DEPLOY.md"
 
-      # channels.json on this repository's main (internal/channels,
-      # docs/plans/RELEASE_CHANNELS.md): the Stable and Release candidate
-      # versions and each version line's support dates, which installed apps
-      # read instead of GitHub's rate-limited API. Built from the published
-      # releases and packaging/release-lines.json; Stable and LTS never go
-      # back. A failure here never fails the release: apps then ask the API,
-      # as before. Prints the channels' versions only.
-      - name: Set up Go for the channel list
-        continue-on-error: true
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: source/go.mod
-          cache: false
+      # The release is out either way; this turns the job red when a step
+      # after Publish failed, naming it, so it is redone by hand and never missed.
+      - name: Report what failed after publishing
+        if: always()
+        env:
+          CHANNELS: ${{ steps.channels.outcome }}
+          TAP: ${{ steps.tap.outcome }}
+          IMAGE: ${{ steps.image.outcome }}
+          CHART: ${{ steps.chart.outcome }}
+        run: |
+          failed=""
+          [ "$CHANNELS" = failure ] && failed="$failed channel-list"
+          [ "$TAP" = failure ] && failed="$failed homebrew-tap"
+          [ "$IMAGE" = failure ] && failed="$failed container-image"
+          [ "$CHART" = failure ] && failed="$failed helm-chart"
+          if [ -n "$failed" ]; then echo "::error::Published, but these steps failed:$failed"; exit 1; fi
+          echo "Every step after publishing succeeded"
 
-      - name: Update the channel list
-        continue-on-error: true
+  # What people install, installed: the formula and cask from the tap, and the
+  # DMG, each from the published release (stable only: the tap skips
+  # prereleases). Prints versions and pass or fail only.
+  verify-install:
+    name: Verify install ${{ matrix.os }}
+    if: ${{ inputs.publish && startsWith(inputs.ref, 'v') && !contains(inputs.ref, '-') }}
+    needs: release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos, runner: macos-15 }
+          - { os: linux, runner: ubuntu-24.04 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ inputs.ref }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+    steps:
+      - name: Formula
+        run: |
+          if [ -x /home/linuxbrew/.linuxbrew/bin/brew ]; then eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"; fi
+          brew tap -q spandock/spandock
+          brew install -q spandock/spandock/spandock >/dev/null
+          brew test spandock/spandock/spandock >/dev/null
+          spandock -version | grep -qF "${TAG#v}" || { echo "::error::The formula did not install ${TAG#v}"; exit 1; }
+          echo "The formula installs and runs ${TAG#v}"
+          brew uninstall -q spandock/spandock/spandock
+
+      - name: Cask
+        if: matrix.os == 'macos'
+        run: |
+          brew install -q --cask spandock/spandock/spandock >/dev/null
+          app=/Applications/SpanDock.app
+          "$app/Contents/MacOS/SpanDock" -version | grep -qF "${TAG#v}" || { echo "::error::The cask did not install ${TAG#v}"; exit 1; }
+          spctl --assess --type execute "$app" || { echo "::error::Gatekeeper refuses the installed app"; exit 1; }
+          xcrun stapler validate -q "$app" || { echo "::error::The installed app has no notarization ticket"; exit 1; }
+          echo "The cask installs ${TAG#v}, and Gatekeeper accepts it"
+
+      - name: DMG
+        if: matrix.os == 'macos'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          TAG: ${{ inputs.ref }}
         run: |
-          test -d public/.git || { echo "No checkout of main; the channel list stays as it is"; exit 0; }
-          git -C public pull -q --ff-only origin main || true
-          gh release list -L 1000 --json tagName,isPrerelease,isDraft,publishedAt > releases.json
-          (cd source && go run scripts/release-channels.go -releases ../releases.json -policy packaging/release-lines.json \
-            -previous ../public/channels.json -tag "$TAG" -notes ../notes.md -out ../public/channels.json)
-          cd public
-          git add channels.json
-          if git diff --cached --quiet; then echo "channels.json is current"; exit 0; fi
-          git -c user.name="SpanDock release" -c user.email="releases@users.noreply.github.com" commit -q -m "Channels after SpanDock $TAG"
-          git push -q origin HEAD:main
+          dmg="SpanDock-${TAG#v}-macos-arm64.dmg"
+          gh release download "$TAG" --pattern "$dmg" --dir dmg
+          spctl --assess --type open --context context:primary-signature "dmg/$dmg" || { echo "::error::Gatekeeper refuses the DMG"; exit 1; }
+          xcrun stapler validate -q "dmg/$dmg" || { echo "::error::The DMG has no notarization ticket"; exit 1; }
+          echo "Gatekeeper accepts the DMG"
